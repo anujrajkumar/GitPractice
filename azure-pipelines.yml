@@ -1,0 +1,270 @@
+# Node.js with React
+# Build a Node.js project that uses React.
+# Add steps that analyze code, save build artifacts, deploy, and more:
+# https://docs.microsoft.com/azure/devops/pipelines/languages/javascript
+
+# parameters:
+#  - name: envSelection
+#    displayName: Environment Selection
+#    type: string
+#    default: Red
+#    values:
+#     - Red
+#     - Pink
+#     - Pre-prod
+
+trigger:
+- none
+
+pool: 
+  vmImage: ubuntu-latest
+
+variables:
+- group: react-app
+# - group: ${{ parameters.envSelection }}
+# - name: environment
+#   value:  ${{ parameters.envSelection }}    
+
+stages: 
+- stage: Build
+  jobs:
+  - job: Build
+    displayName: Build React App
+    steps:
+    - task: NodeTool@0
+      inputs:
+       versionSpec: '10.x'
+      displayName: 'Install Node.js'
+
+    - script: |
+        pushd src
+        npm install
+        npm run build
+        popd
+        ls
+      workingDirectory: $(System.DefaultWorkingDirectory)
+      displayName: 'npm install and build'
+    
+    # - task: CopyFiles@2
+    #   displayName: 'Copy files'
+    #   inputs:
+    #     sourceFolder: '$(System.DefaultWorkingDirectory)/build' 
+    #     Contents: '**/*'
+    #     TargetFolder: '$(Build.ArtifactStagingDirectory)'
+    #     cleanTargetFolder: true
+    
+    - task: Docker@2
+      inputs:
+        containerRegistry: 'Docker-reactapp'
+        repository: 'anuj730/jpipeline_demo'
+        command: 'buildAndPush'
+        Dockerfile: '**/Dockerfile'
+        tags: 'react-app'
+      
+    - task: CopyFiles@2
+      inputs:
+        SourceFolder: '$(System.DefaultWorkingDirectory)/kubernetes'
+        Contents: 'deployment.yml'
+        TargetFolder: '$(Build.ArtifactStagingDirectory)'
+    
+    - task: PublishBuildArtifacts@1
+      inputs:
+        PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        ArtifactName: 'react-app'
+        publishLocation: 'Container'
+
+    # - task: ArchiveFiles@2
+    #   inputs:
+    #     rootFolderOrFile: '$(System.DefaultWorkingDirectory)/build'
+    #     includeRootFolder: false
+    #     archiveType: 'zip'
+    #     archiveFile: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip'
+    #     replaceExistingArchive: true
+    
+    # - task: PublishPipelineArtifact@1
+    #   inputs:
+    #     targetPath: '$(Build.ArtifactStagingDirectory)/$(Build.BuildId).zip'
+    #     artifact: 'reactapp'
+    #     publishLocation: 'pipeline'
+      
+- stage: Infra
+  condition: succeeded()
+  jobs:
+    - job: Creating_Infra
+      displayName: Infra creation
+      steps:
+      - task: replacetokens@3
+        inputs:
+          rootDirectory: '$(System.DefaultWorkingDirectory)/Infra'
+          targetFiles: |
+            main.tf
+            variables.tfvars
+            variables.tf
+          encoding: 'auto'
+          writeBOM: true
+          actionOnMissing: 'warn'
+          keepToken: false
+          tokenPrefix: '__'
+          tokenSuffix: '__'
+          useLegacyPattern: false
+          enableTransforms: false
+          enableTelemetry: true
+        displayName: Replace Token
+      
+     
+      - task: TerraformInstaller@0
+        inputs:
+          terraformVersion: '1.0.2'
+      
+      - task: TerraformTaskV2@2
+        inputs:
+          provider: 'azurerm'
+          command: 'init'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/Infra'
+          backendServiceArm: '$(Subscription)'
+          backendAzureRmResourceGroupName: '$(ContainerRG)'
+          backendAzureRmStorageAccountName: '$(StorageAccountName)'
+          backendAzureRmContainerName: '$(ContainerName)'
+          backendAzureRmKey: 'akscluster.tfstate'
+      
+      - task: TerraformTaskV2@2
+        displayName: Terraform plan
+        inputs:
+          provider: 'azurerm'
+          command: 'plan'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/Infra'
+          # commandOptions: '-var-file="$(System.DefaultWorkingDirectory)/Infra/variables.tfvars" -out=tfplan -lock=false'
+          commandOptions: '-out=tfplan -lock=false'
+          environmentServiceNameAzureRM: '$(Subscription)'
+
+      # - task: PowerShell@2
+      #   displayName: Terraform changes
+      #   inputs:
+      #     workingDirectory: '$(System.DefaultWorkingDirectory)/Infra'
+      #     targetType: 'inline'
+      #     script: |
+      #       # Write-Host "lastTerraformCode : $lastTerraformCode"
+      #       $plan = $(terraform show -json tfplan | ConvertFrom-Json)
+      #       $actions = $plan.resource_changes.change.actions
+      #       Write-Host "Terraform actions : $actions"
+      #       if (($actions -contains 'create') -or ($actions -contains 'delete') -or ($actions -contains 'update'))
+      #       {
+      #         Write-Host "Terraform will perform the following actions : $actions"
+      #         Write-Host "##vso[task.setvariable variable=anyChangeTF;]true"
+      #       }
+      #       else
+      #       {
+      #         Write-Host "There is no change detected in Terraform tfplan file"
+      #       }
+
+      - task: TerraformTaskV2@2
+        displayName: Terraform apply
+        # condition: eq(variables.anyChangeTF, true)
+        inputs:
+          provider: 'azurerm'
+          command: 'apply'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/Infra'
+          commandOptions: 'tfplan'
+          environmentServiceNameAzureRM: '$(Subscription)'
+
+- stage: Deployment
+  jobs:
+  - deployment: Deploy
+    displayName: Deployment React App
+    environment: Env
+    strategy:
+          runOnce:
+            deploy:
+              steps:  
+              # - task: AzureRmWebAppDeployment@4
+              #   inputs:
+              #     ConnectionType: 'AzureRM'
+              #     azureSubscription: 'Microsoft Partner Network(55cf0ba9-e3c1-4ced-b5e9-5abb7b4d39b1)'
+              #     appType: 'webApp'
+              #     WebAppName: '$(AppServiceName)'
+              #     packageForLinux: '$(Pipeline.Workspace)/reactapp/*.zip'
+
+              # - task: AzureWebAppContainer@1
+              #   inputs:
+              #     azureSubscription: 'Microsoft Partner Network(55cf0ba9-e3c1-4ced-b5e9-5abb7b4d39b1)'
+              #     appName: '$(AppServiceName)'
+              #     containers: anuj730/jpipeline_demo:react-app
+
+              - task: DownloadBuildArtifacts@1
+                inputs:
+                  buildType: 'current'
+                  downloadType: 'single'
+                  artifactName: 'react-app'
+                  itemPattern: '**/*.yml'
+                  downloadPath: '$(System.ArtifactsDirectory)'
+              
+              - task: KubernetesManifest@0
+                inputs:
+                  action: 'deploy'
+                  kubernetesServiceConnection: 'k8s-service-connection'
+                  namespace: 'default'
+                  manifests: '$(System.ArtifactsDirectory)/react-app/deployment.yml'
+                  containers: 'anuj730/jpipeline_demo:react-app'
+            
+    
+- stage: Destroying_Infra
+  jobs:
+  - job: Manual_Vaidation
+    displayName: Manual Validation
+    pool: server
+    timeoutInMinutes: 4320 
+    steps:
+      
+      - task: ManualValidation@0
+        inputs:
+          notifyUsers: 'anuj.kumar@testingxperts.com'
+          instructions: 'Please permit the job for further process'
+          onTimeout: 'resume'
+
+  - job: Infra_Destroy
+    steps:
+     
+      - task: replacetokens@3
+        inputs:
+          rootDirectory: '$(System.DefaultWorkingDirectory)/Infra'
+          targetFiles: |
+            main.tf
+            variables.tfvars
+            variables.tf
+          encoding: 'auto'
+          writeBOM: true
+          actionOnMissing: 'warn'
+          keepToken: false
+          tokenPrefix: '__'
+          tokenSuffix: '__'
+          useLegacyPattern: false
+          enableTransforms: false
+          enableTelemetry: true
+        displayName: Replace Token
+
+      - task: TerraformTaskV2@2
+        inputs:
+          provider: 'azurerm'
+          command: 'init'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/Infra'
+          backendServiceArm: '$(Subscription)'
+          backendAzureRmResourceGroupName: '$(ContainerRG)'
+          backendAzureRmStorageAccountName: '$(StorageAccountName)'
+          backendAzureRmContainerName: '$(ContainerName)'
+          backendAzureRmKey: 'akscluster.tfstate' 
+
+      # - task: TerraformTaskV2@2
+      #   inputs:
+      #     provider: 'azurerm'
+      #     command: 'plan'
+      #     workingDirectory: '$(System.DefaultWorkingDirectory)/Infra'
+      #     commandOptions: '-var-file="$(System.DefaultWorkingDirectory)/Infra/variables.tfvars" -out=tfplan -lock=false'
+      #     environmentServiceNameAzureRM: '$(Subscription)'
+
+      - task: TerraformTaskV2@2
+        inputs:
+          provider: 'azurerm'
+          command: 'destroy'
+          workingDirectory: '$(System.DefaultWorkingDirectory)/Infra'
+          environmentServiceNameAzureRM: '$(Subscription)'
+          # commandOptions: '-var-file="$(System.DefaultWorkingDirectory)/Infra/variables.tfvars"'
